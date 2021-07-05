@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_recursion::async_recursion;
-use futures_lite::future::poll_once;
 use rusoto_core::RusotoError;
 use rusoto_logs::{
     CloudWatchLogs, CreateLogStreamRequest, InputLogEvent, PutLogEventsError, PutLogEventsRequest,
@@ -13,6 +12,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::time::sleep;
 
 use crate::error::RusotoLogsError;
+use crate::future::poll_once;
 use crate::{
     CLOUDWATCH_EXTRA_MSG_PAYLOAD_SIZE, CLOUDWATCH_MAX_BATCH_EVENTS_LENGTH,
     CLOUDWATCH_MAX_BATCH_SIZE,

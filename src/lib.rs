@@ -1,4 +1,5 @@
 mod error;
+mod future;
 mod worker;
 mod writer;
 

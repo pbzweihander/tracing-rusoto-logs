@@ -11,8 +11,8 @@ rustls = ["rusoto_core/rustls", "rusoto_logs/rustls"]
 
 [dependencies]
 async-recursion = "0.3"
-futures-lite = "1.12"
 parking_lot = "0.11"
+pin-project-lite = "0.2"
 rusoto_core = { version = "0.47", default-features = false }
 rusoto_logs = { version = "0.47", default-features = false }
 tokio = { version = "1", default-features = false, features = ["sync", "rt", "time"] }

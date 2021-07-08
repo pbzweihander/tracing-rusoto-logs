@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rusoto_logs::{CloudWatchLogs, CloudWatchLogsClient, InputLogEvent};
+use tokio::runtime::{Builder, Handle};
 use tokio::sync::mpsc::{channel, Sender};
 use tracing_core::Metadata;
 use tracing_subscriber::fmt::MakeWriter;
 
-use crate::worker::spawn_rusoto_worker;
+use crate::worker::rusoto_worker_loop;
 use crate::{
     CLOUDWATCH_EXTRA_MSG_PAYLOAD_SIZE, CLOUDWATCH_MAX_BATCH_EVENTS_LENGTH,
     CLOUDWATCH_MAX_BATCH_SIZE,
@@ -20,17 +21,27 @@ pub struct RusotoLogsWriterBuilder<C, F> {
     default_log_stream: String,
     make_log_stream: F,
     channels: Arc<RwLock<HashMap<String, Sender<InputLogEvent>>>>,
+    runtime_handle: Handle,
 }
 
 impl RusotoLogsWriterBuilder<(), Box<dyn Fn(&Metadata) -> String + Send + Sync>> {
     pub fn new(log_group: &str, default_log_stream: &str) -> Self {
         let default_log_stream = default_log_stream.to_string();
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build tokio runtime");
+        let runtime_handle = runtime.handle().clone();
+        std::thread::spawn(move || {
+            runtime.block_on(std::future::pending::<()>());
+        });
         Self {
             client: Arc::new(()),
             log_group: log_group.to_string(),
             default_log_stream: default_log_stream.clone(),
             make_log_stream: Box::new(move |_| default_log_stream.clone()),
             channels: Arc::new(RwLock::new(HashMap::new())),
+            runtime_handle,
         }
     }
 }
@@ -46,6 +57,7 @@ impl<C, F> RusotoLogsWriterBuilder<C, F> {
             default_log_stream: self.default_log_stream,
             make_log_stream: self.make_log_stream,
             channels: self.channels,
+            runtime_handle: self.runtime_handle,
         }
     }
 
@@ -56,6 +68,7 @@ impl<C, F> RusotoLogsWriterBuilder<C, F> {
             default_log_stream: self.default_log_stream,
             make_log_stream: self.make_log_stream,
             channels: self.channels,
+            runtime_handle: self.runtime_handle,
         }
     }
 
@@ -69,6 +82,7 @@ impl<C, F> RusotoLogsWriterBuilder<C, F> {
             default_log_stream: self.default_log_stream,
             make_log_stream,
             channels: self.channels,
+            runtime_handle: self.runtime_handle,
         }
     }
 }
@@ -88,12 +102,12 @@ where
         drop(read_guard);
         let mut write_guard = self.channels.write();
         let (sender, receiver) = channel(CLOUDWATCH_MAX_BATCH_EVENTS_LENGTH);
-        spawn_rusoto_worker(
+        self.runtime_handle.spawn(rusoto_worker_loop(
             self.client.clone(),
+            receiver,
             self.log_group.clone(),
             log_stream.clone(),
-            receiver,
-        );
+        ));
         write_guard.insert(log_stream, sender.clone());
         sender
     }
@@ -108,12 +122,12 @@ where
 
     fn make_writer(&self) -> Self::Writer {
         let channel = self.get_or_spawn_worker(self.default_log_stream.clone());
-        RusotoLogsWriter::new(channel)
+        RusotoLogsWriter::new(channel, self.runtime_handle.clone())
     }
 
     fn make_writer_for(&self, metadata: &Metadata<'_>) -> Self::Writer {
         let channel = self.get_or_spawn_worker((self.make_log_stream)(metadata));
-        RusotoLogsWriter::new(channel)
+        RusotoLogsWriter::new(channel, self.runtime_handle.clone())
     }
 }
 
@@ -122,8 +136,11 @@ pub struct RusotoLogsWriter {
 }
 
 impl RusotoLogsWriter {
-    fn new(channel: Sender<InputLogEvent>) -> Self {
-        let inner = Inner { channel };
+    fn new(channel: Sender<InputLogEvent>, runtime_handle: Handle) -> Self {
+        let inner = Inner {
+            channel,
+            runtime_handle,
+        };
         let line_writer = io::LineWriter::new(inner);
         Self { line_writer }
     }
@@ -153,6 +170,7 @@ impl io::Write for RusotoLogsWriter {
 #[derive(Clone)]
 struct Inner {
     channel: Sender<InputLogEvent>,
+    runtime_handle: Handle,
 }
 
 impl io::Write for Inner {
@@ -173,7 +191,7 @@ impl io::Write for Inner {
         let message = String::from_utf8(buf.to_vec())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let channel = self.channel.clone();
-        tokio::spawn(async move {
+        self.runtime_handle.spawn(async move {
             let _ = channel.send(InputLogEvent { message, timestamp }).await;
         });
 

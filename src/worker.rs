@@ -18,15 +18,6 @@ use crate::{
     CLOUDWATCH_MAX_BATCH_SIZE,
 };
 
-pub fn spawn_rusoto_worker(
-    client: Arc<impl CloudWatchLogs + Send + Sync + 'static>,
-    log_group: String,
-    log_stream: String,
-    channel: Receiver<InputLogEvent>,
-) {
-    tokio::spawn(rusoto_worker_loop(client, channel, log_group, log_stream));
-}
-
 #[async_recursion]
 async fn put_log_events(
     client: &(impl CloudWatchLogs + Sync),
@@ -91,7 +82,7 @@ async fn put_log_events(
     Err(err.into())
 }
 
-async fn rusoto_worker_loop(
+pub async fn rusoto_worker_loop(
     client: Arc<impl CloudWatchLogs + Send + Sync>,
     channel: Receiver<InputLogEvent>,
     log_group: String,
